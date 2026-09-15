@@ -108,6 +108,8 @@ def inject_styles() -> None:
         .finding-summary div { padding:10px 12px; background:white; border:1px solid var(--line); border-left:3px solid #788991; border-radius:6px; }
         .finding-summary div:nth-child(1) { border-left-color:var(--red); }.finding-summary div:nth-child(2) { border-left-color:#c47a26; }
         .finding-summary strong,.finding-summary small { display:block; }.finding-summary strong { font-size:1.2rem; }.finding-summary small { margin-top:2px; color:var(--muted); font-size:.68rem; }
+        .priority-title { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px; margin:14px 0 2px; }
+        .priority-title strong { color:var(--ink); font-size:.83rem; }.priority-title span { color:var(--muted); font-size:.7rem; }
         .finding-list { display:grid; gap:9px; }
         .finding-row { padding:12px 14px; background:white; border:1px solid var(--line); border-left:4px solid #788991; border-radius:6px; }
         .finding-row.urgent { border-left-color:var(--red); }.finding-row.high { border-left-color:#c47a26; }.finding-row.medium { border-left-color:#b48a2c; }
@@ -378,6 +380,54 @@ def priority_summary(findings: list[dict[str, Any]]) -> str:
     )
 
 
+def priority_cell_style(value: Any) -> str:
+    styles = {
+        "Urgent": "background-color:#f4d8d6;color:#8b2f2a;font-weight:700",
+        "High": "background-color:#f8e5cf;color:#8a5314;font-weight:700",
+        "Medium": "background-color:#f5efd9;color:#6f5a12;font-weight:700",
+        "Review": "background-color:#e8eef0;color:#455b65;font-weight:700",
+    }
+    return styles.get(str(value), "")
+
+
+def cvss_cell_style(value: Any) -> str:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return "background-color:#f1f3f4;color:#63727a"
+    if score >= 9:
+        return "background-color:#f9e4e2;color:#8b2f2a;font-weight:700"
+    if score >= 7:
+        return "background-color:#faeddc;color:#8a5314;font-weight:700"
+    if score >= 4:
+        return "background-color:#f7f2df;color:#6f5a12"
+    return "background-color:#e8f3ef;color:#27685f"
+
+
+def format_epss(value: Any) -> str:
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def vulnerability_view(rows: list[dict[str, Any]]):
+    frame = pd.DataFrame(rows).copy()
+    rank = {"Urgent": 0, "High": 1, "Medium": 2, "Review": 3}
+    frame["_priority_rank"] = frame["Technical Priority"].map(rank).fillna(9)
+    frame["_epss_sort"] = pd.to_numeric(frame["EPSS"], errors="coerce").fillna(-1)
+    frame["_cvss_sort"] = pd.to_numeric(frame["CVSS"], errors="coerce").fillna(-1)
+    frame = frame.sort_values(["_priority_rank", "_epss_sort", "_cvss_sort"], ascending=[True, False, False])
+    frame = frame.drop(columns=["_priority_rank", "_epss_sort", "_cvss_sort"])
+    frame["EPSS"] = frame["EPSS"].map(format_epss)
+    return (
+        frame.style
+        .apply(lambda column: [priority_cell_style(value) for value in column], subset=["Technical Priority"])
+        .apply(lambda column: [cvss_cell_style(value) for value in column], subset=["CVSS"])
+        .format({"CVSS": lambda value: f"{float(value):.1f}" if pd.notna(value) else "N/A"})
+    )
+
+
 def finding_rows(findings: list[dict[str, Any]]) -> str:
     rows = []
     for finding in findings:
@@ -453,6 +503,10 @@ def display_results(result: dict[str, Any]) -> None:
         for column, (label, value, help_text) in zip(metric_columns, metric_row):
             column.metric(label, value, help=help_text)
 
+    st.markdown(
+        "<div class='priority-title'><strong>All prioritized findings</strong><span>Across vulnerabilities, internet exposure, and TLS/PQC observations</span></div>",
+        unsafe_allow_html=True,
+    )
     st.markdown(f"<div class='finding-summary'>{priority_summary(result['findings'])}</div>", unsafe_allow_html=True)
 
     if meta.get("profile") == PROFILE_QUICK:
@@ -512,14 +566,23 @@ def display_results(result: dict[str, Any]) -> None:
         st.markdown("### Vulnerability observations")
         if result["cve_rows"]:
             st.dataframe(
-                pd.DataFrame(result["cve_rows"]),
+                vulnerability_view(result["cve_rows"]),
                 width="stretch",
                 hide_index=True,
                 column_order=["Technical Priority", "IP", "CVE ID", "CISA KEV", "EPSS", "CVSS", "Title", "Known ransomware use"],
+                column_config={
+                    "Technical Priority": st.column_config.TextColumn("Technical Priority", width="medium"),
+                    "IP": st.column_config.TextColumn("IP", width="small"),
+                    "CVE ID": st.column_config.TextColumn("CVE ID", width="small"),
+                    "CISA KEV": st.column_config.TextColumn("CISA KEV", width="small"),
+                    "EPSS": st.column_config.TextColumn("EPSS", width="small", help="Estimated probability of exploitation in the next 30 days"),
+                    "CVSS": st.column_config.TextColumn("CVSS", width="small", help="Base technical severity; this is only one priority input"),
+                    "Title": st.column_config.TextColumn("Title", width="large"),
+                },
             )
         else:
             st.info("No CVE associations were reported by Shodan InternetDB at scan time. This is not evidence that the assets are vulnerability-free.")
-        st.caption("Technical priority uses KEV, EPSS, and CVSS. Customer asset criticality and applicability must still be validated.")
+        st.caption("Technical Priority combines CISA KEV, EPSS, and CVSS. CVSS color shows severity only; customer criticality and applicability still require validation.")
 
     with tls_tab:
         st.markdown("### TLS lifecycle and post-quantum readiness")
