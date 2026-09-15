@@ -35,6 +35,18 @@ DNSDUMPSTER_API_KEY = secret("dnsdumpster_api_key")
 OPENCVE_USER = secret("opencve_user")
 OPENCVE_PASS = secret("opencve_pass")
 
+PROFILE_STANDARD = "Standard presales"
+PROFILE_QUICK = "Quick discovery"
+PROFILE_FOCUSED = "Focused TLS and PQC"
+PROFILE_CUSTOM = "Custom"
+PROFILE_ORDER = (PROFILE_STANDARD, PROFILE_QUICK, PROFILE_FOCUSED, PROFILE_CUSTOM)
+PROFILE_HELP = {
+    PROFILE_STANDARD: "Recommended for most presales work. Discovers exposure, enriches CVEs, and assesses TLS and PQC in one run.",
+    PROFILE_QUICK: "Fast first round. Maps public assets, services, and CVE associations without active TLS checks.",
+    PROFILE_FOCUSED: "Second round for certificate lifecycle, TLS posture, and hybrid key exchange on discovered or selected ports.",
+    PROFILE_CUSTOM: "Expert mode. Manually control TLS, key-exchange probing, timeouts, concurrency, and additional ports.",
+}
+
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def cached_google_dns(domain: str):
@@ -106,14 +118,26 @@ def inject_styles() -> None:
         .finding-observation { margin:0 0 8px; color:var(--ink); font-size:.86rem; line-height:1.45; }
         .finding-detail { display:grid; grid-template-columns:1fr 1fr; gap:10px; color:#52636c; font-size:.73rem; line-height:1.45; }
         .finding-detail strong { display:block; margin-bottom:2px; color:#31454f; font-size:.66rem; text-transform:uppercase; }
+        .health-list { display:grid; gap:6px; }
+        .health-row { display:grid; grid-template-columns:minmax(0,.8fr) minmax(0,.75fr) minmax(0,1.6fr); gap:8px; padding:9px 10px; background:white; border:1px solid var(--line); border-radius:5px; font-size:.72rem; line-height:1.4; }
+        .health-row span { min-width:0; overflow-wrap:anywhere; }.health-source { color:var(--ink); font-weight:700; }.health-state { color:#087f73; font-weight:700; }.health-detail { color:var(--muted); }
+        .workflow-steps { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:0; margin:4px 0 18px; border:1px solid var(--line); border-radius:7px; overflow:hidden; background:white; }
+        .workflow-step { display:flex; align-items:center; gap:9px; min-width:0; min-height:68px; padding:10px 12px; border-right:1px solid var(--line); }
+        .workflow-step div { min-width:0; }
+        .workflow-step:last-child { border-right:0; }.workflow-step span { display:grid; place-items:center; flex:0 0 27px; height:27px; border-radius:50%; color:#52636c; background:#edf1f2; font-size:.74rem; font-weight:800; }
+        .workflow-step strong,.workflow-step small { display:block; }.workflow-step strong { color:var(--ink); font-size:.78rem; }.workflow-step small { margin-top:2px; color:var(--muted); font-size:.65rem; line-height:1.3; }
+        .workflow-step.done span { color:white; background:var(--teal); }.workflow-step.active { background:#eef7f5; }.workflow-step.active span { color:white; background:var(--teal); }
+        .profile-note { margin:8px 0 2px; padding:10px 11px; color:#dce9eb; background:#2b3b45; border-left:3px solid #2aa897; border-radius:5px; font-size:.74rem; line-height:1.5; }
+        .next-action { margin:2px 0 12px; padding:12px 14px; background:#eef7f5; border-left:4px solid var(--teal); border-radius:6px; color:#34515a; font-size:.8rem; line-height:1.5; }
+        .next-action strong { color:var(--ink); }
         .boundary-note { padding:12px 14px; color:#40545e; background:#eef4f6; border-left:3px solid #36748f; border-radius:5px; font-size:.78rem; line-height:1.55; }
         .source-ok { color:#087f73; font-weight:700; }.source-warn { color:#a96c17; font-weight:700; }
         button[kind="primary"] { border-radius:6px; background:var(--teal); border-color:var(--teal); }
         button[kind="secondary"] { border-radius:6px; }
         [data-baseweb="tab-list"] { gap:8px; }
         [data-baseweb="tab"] { min-height:42px; padding:0 12px; }
-        @media(max-width:900px) { .product-header { flex-direction:column; }.finding-summary { grid-template-columns:1fr 1fr; }.finding-detail { grid-template-columns:1fr; }.finding-asset { width:100%; margin-left:0; } }
-        @media(max-width:560px) { .finding-summary { grid-template-columns:1fr; } }
+        @media(max-width:900px) { .product-header { flex-direction:column; }.finding-summary { grid-template-columns:1fr 1fr; }.finding-detail { grid-template-columns:1fr; }.finding-asset { width:100%; margin-left:0; }.health-row { grid-template-columns:1fr; gap:2px; }.workflow-steps { grid-template-columns:1fr 1fr; }.workflow-step:nth-child(2) { border-right:0; }.workflow-step:nth-child(-n+2) { border-bottom:1px solid var(--line); } }
+        @media(max-width:560px) { .finding-summary { grid-template-columns:1fr; }.workflow-steps { grid-template-columns:1fr; }.workflow-step { border-right:0; border-bottom:1px solid var(--line); }.workflow-step:last-child { border-bottom:0; } }
         </style>
         """,
         unsafe_allow_html=True,
@@ -122,6 +146,38 @@ def inject_styles() -> None:
 
 def add_health(rows: list[dict[str, str]], source: str, status: str, detail: str) -> None:
     rows.append({"Source": source, "Status": status, "Detail": detail})
+
+
+def profile_parameters(profile: str) -> tuple[bool, bool, int, int, str]:
+    if profile == PROFILE_QUICK:
+        return False, False, 6, 8, ""
+    if profile == PROFILE_FOCUSED:
+        return True, True, 12, 6, st.session_state.get("extra_tls_ports_input", "")
+    if profile == PROFILE_CUSTOM:
+        return (
+            st.session_state.get("custom_do_tls", True),
+            st.session_state.get("custom_probe_kex", True),
+            st.session_state.get("custom_tls_timeout", 8),
+            st.session_state.get("custom_tls_workers", 8),
+            st.session_state.get("custom_extra_ports", ""),
+        )
+    return True, True, 8, 8, ""
+
+
+def workflow_steps(has_result: bool) -> str:
+    steps = (
+        ("1", "Set scope", "Customer and authorized targets"),
+        ("2", "Discover", "External evidence and TLS checks"),
+        ("3", "Validate", "Confirm ownership and applicability"),
+        ("4", "Export", "Word report and Excel evidence"),
+    )
+    rendered = []
+    for index, (number, title, detail) in enumerate(steps):
+        state = "done" if has_result and index < 2 else "active" if (has_result and index == 2) or (not has_result and index == 0) else ""
+        rendered.append(
+            f"<div class='workflow-step {state}'><span>{number}</span><div><strong>{title}</strong><small>{detail}</small></div></div>"
+        )
+    return "<div class='workflow-steps'>" + "".join(rendered) + "</div>"
 
 
 def run_scan(
@@ -134,6 +190,7 @@ def run_scan(
     tls_timeout: int,
     tls_workers: int,
     extra_ports_text: str,
+    profile_name: str,
 ) -> dict[str, Any] | None:
     accepted, rejected = recon_core.parse_targets(target_text)
     extra_ports, rejected_ports = recon_core.parse_extra_ports(extra_ports_text)
@@ -298,6 +355,8 @@ def run_scan(
             "started_at": started.isoformat(timespec="seconds"),
             "completed_at": completed.isoformat(timespec="seconds"),
             "tool_version": "2.0.0",
+            "profile": profile_name,
+            "normalized_targets": [target.value for target in accepted],
             "method": "External telemetry plus ordinary TLS handshakes; no exploitation",
         },
         "summary": summary,
@@ -339,6 +398,37 @@ def finding_rows(findings: list[dict[str, Any]]) -> str:
     return "<div class='finding-list'>" + "".join(rows) + "</div>"
 
 
+def health_rows(health: list[dict[str, Any]]) -> str:
+    rows = []
+    for item in health:
+        rows.append(
+            "<div class='health-row'>"
+            f"<span class='health-source'>{html.escape(str(item.get('Source', '')))}</span>"
+            f"<span class='health-state'>{html.escape(str(item.get('Status', '')))}</span>"
+            f"<span class='health-detail'>{html.escape(str(item.get('Detail', '')))}</span>"
+            "</div>"
+        )
+    return "<div class='health-list'>" + "".join(rows) + "</div>"
+
+
+def prepare_tls_follow_up(result: dict[str, Any]) -> None:
+    ports = sorted({
+        int(port)
+        for asset in result.get("asset_rows", [])
+        for port in asset.get("Ports", [])
+        if int(port) in pqc_tls.DEFAULT_TLS_PORTS and int(port) != 443
+    })
+    meta = result.get("meta", {})
+    st.session_state["assessment_profile"] = PROFILE_FOCUSED
+    st.session_state["customer_input"] = meta.get("customer", "")
+    st.session_state["engagement_input"] = "Focused TLS and PQC follow-up"
+    st.session_state["scope_input"] = f"{meta.get('scope', '').rstrip('.')} Follow-up based on initial external discovery."
+    st.session_state["targets_input"] = "\n".join(meta.get("normalized_targets", []))
+    st.session_state["extra_tls_ports_input"] = ", ".join(map(str, ports))
+    st.session_state["authorized_input"] = False
+    st.session_state["followup_prepared"] = True
+
+
 def display_results(result: dict[str, Any]) -> None:
     meta = result["meta"]
     summary = result["summary"]
@@ -365,6 +455,30 @@ def display_results(result: dict[str, Any]) -> None:
 
     st.markdown(f"<div class='finding-summary'>{priority_summary(result['findings'])}</div>", unsafe_allow_html=True)
 
+    if meta.get("profile") == PROFILE_QUICK:
+        candidate_ports = sorted({
+            int(port)
+            for asset in result.get("asset_rows", [])
+            for port in asset.get("Ports", [])
+            if int(port) in pqc_tls.DEFAULT_TLS_PORTS
+        })
+        port_text = ", ".join(map(str, candidate_ports)) or "443"
+        st.markdown(
+            f"<div class='next-action'><strong>Next recommended round:</strong> validate the discovered assets, then assess TLS and PQC on candidate ports {html.escape(port_text)}.</div>",
+            unsafe_allow_html=True,
+        )
+        st.button(
+            "Prepare focused TLS and PQC follow-up",
+            on_click=prepare_tls_follow_up,
+            args=(result,),
+            width="stretch",
+        )
+    else:
+        st.markdown(
+            "<div class='next-action'><strong>Next action:</strong> review the priority findings with the customer, confirm ownership and applicability, then export the evidence package.</div>",
+            unsafe_allow_html=True,
+        )
+
     overview_tab, assets_tab, vulnerabilities_tab, tls_tab, report_tab = st.tabs(
         ["Overview", "Assets", "Vulnerabilities", "TLS & PQC", "Report"]
     )
@@ -378,8 +492,7 @@ def display_results(result: dict[str, Any]) -> None:
                 st.success("No prioritized findings were generated from the available observations.")
         with right:
             st.markdown("### Evidence coverage")
-            health = pd.DataFrame(result["source_health"])
-            st.dataframe(health, width="stretch", hide_index=True)
+            st.markdown(health_rows(result["source_health"]), unsafe_allow_html=True)
             if result["rejected_targets"]:
                 with st.expander(f"Blocked or excluded items ({len(result['rejected_targets'])})"):
                     st.dataframe(pd.DataFrame(result["rejected_targets"]), width="stretch", hide_index=True)
@@ -452,24 +565,46 @@ def display_results(result: dict[str, Any]) -> None:
 
 
 inject_styles()
+if "engagement_input" not in st.session_state:
+    st.session_state["engagement_input"] = "External exposure and PQC readiness review"
 
 with st.sidebar:
-    st.markdown("## Scan profile")
-    st.caption("Controls for authorized external assessment")
-    do_tls = st.checkbox("Assess TLS endpoints", value=True)
-    probe_kex = st.checkbox(
-        "Probe hybrid PQC key exchange",
-        value=True,
-        help="Requires OpenSSL 3.5+. Otherwise the result remains UNKNOWN.",
+    st.markdown("## Assessment profile")
+    profile = st.radio(
+        "Choose assessment depth",
+        PROFILE_ORDER,
+        key="assessment_profile",
+        captions=["Recommended", "Fast first round", "Guided second round", "Expert controls"],
     )
-    tls_timeout = st.slider("TLS timeout (seconds)", 3, 20, 8)
-    tls_workers = st.slider("Parallel TLS checks", 1, 20, 8)
-    extra_ports = st.text_input("Additional direct-TLS ports", placeholder="8443, 9443")
+    st.markdown(f"<div class='profile-note'>{html.escape(PROFILE_HELP[profile])}</div>", unsafe_allow_html=True)
+    if profile == PROFILE_FOCUSED:
+        st.text_input(
+            "Additional TLS ports",
+            key="extra_tls_ports_input",
+            placeholder="Auto-filled after discovery",
+            help="Port 443 is always assessed. Add only ports approved for this engagement.",
+        )
+    elif profile == PROFILE_CUSTOM:
+        with st.expander("Advanced controls", expanded=True):
+            st.checkbox("Assess TLS endpoints", value=True, key="custom_do_tls")
+            st.checkbox(
+                "Probe hybrid PQC key exchange",
+                value=True,
+                key="custom_probe_kex",
+                help="Requires OpenSSL 3.5+. Otherwise the result remains UNKNOWN.",
+            )
+            st.slider("TLS timeout (seconds)", 3, 20, 8, key="custom_tls_timeout")
+            st.slider("Parallel TLS checks", 1, 20, 8, key="custom_tls_workers")
+            st.text_input("Additional direct-TLS ports", key="custom_extra_ports", placeholder="8443, 9443")
+    do_tls, probe_kex, tls_timeout, tls_workers, extra_ports = profile_parameters(profile)
     st.divider()
-    if pqc_tls.openssl_supports_mlkem():
-        st.success("OpenSSL supports ML-KEM probing")
-    else:
-        st.warning("ML-KEM probing unavailable; KEX will remain UNKNOWN")
+    if do_tls and probe_kex:
+        if pqc_tls.openssl_supports_mlkem():
+            st.success("Hybrid key-exchange probing available")
+        else:
+            st.warning("Hybrid key-exchange probing unavailable; KEX will remain UNKNOWN")
+    elif not do_tls:
+        st.info("TLS checks are deferred to the follow-up round")
     st.caption(
         f"Safety limits: {recon_core.MAX_INPUT_TARGETS} inputs, {recon_core.MAX_DISCOVERED_IPS} public IPs, "
         f"{recon_core.MAX_TLS_ENDPOINTS} TLS endpoint combinations. Private and reserved addresses are blocked."
@@ -489,28 +624,35 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+current_result = st.session_state.get("scan_result_v2")
+st.markdown(workflow_steps(bool(current_result)), unsafe_allow_html=True)
+if st.session_state.pop("followup_prepared", False):
+    st.info("Focused follow-up is prepared. Review the auto-filled scope and ports, then confirm authorization again.")
+
 with st.container(border=True):
     st.markdown("### Engagement setup")
     customer_col, engagement_col = st.columns(2)
-    customer = customer_col.text_input("Customer / account alias", placeholder="Use a sanitized name for demonstrations")
-    engagement = engagement_col.text_input("Engagement", value="External exposure and PQC readiness review")
-    scope = st.text_input("Scope note", placeholder="Approved domains, business boundary, or assessment purpose")
+    customer = customer_col.text_input("Customer / account alias", key="customer_input", placeholder="Use a sanitized name for demonstrations")
+    engagement = engagement_col.text_input("Engagement", key="engagement_input")
+    scope = st.text_input("Scope note", key="scope_input", placeholder="Approved domains, business boundary, or assessment purpose")
     target_text = st.text_area(
         "Authorized public domains or IP addresses",
+        key="targets_input",
         height=135,
         placeholder="example.com\nwww.example.com",
         help=f"One target per line. Maximum {recon_core.MAX_INPUT_TARGETS}. URLs are normalized to hostnames.",
     )
-    authorized = st.checkbox("I confirm these public targets are authorized for defensive assessment.")
-    run_col, demo_col, spacer_col = st.columns([1, 1, 2])
-    run_clicked = run_col.button("Run authorized assessment", type="primary", disabled=not authorized, width="stretch")
+    authorized = st.checkbox("I confirm these public targets are authorized for defensive assessment.", key="authorized_input")
+    run_col, demo_col = st.columns(2)
+    run_clicked = run_col.button("Run assessment", type="primary", disabled=not authorized, width="stretch")
     demo_clicked = demo_col.button("Load sanitized demo", width="stretch")
 
 if demo_clicked:
     st.session_state["scan_result_v2"] = demo_data.build_demo_result()
+    st.rerun()
 
 if run_clicked:
-    st.session_state["scan_result_v2"] = run_scan(
+    completed_result = run_scan(
         customer,
         engagement,
         scope,
@@ -520,7 +662,11 @@ if run_clicked:
         tls_timeout,
         tls_workers,
         extra_ports,
+        profile,
     )
+    if completed_result:
+        st.session_state["scan_result_v2"] = completed_result
+        st.rerun()
 
 result = st.session_state.get("scan_result_v2")
 if result:

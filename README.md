@@ -16,6 +16,9 @@ The original `PQC` folder is unchanged. This V2 is a separate deployment candida
 - CA/B applicability and NIST IR 8547 draft status are explicitly qualified.
 - Deterministic Word report and formatted Excel evidence package.
 - Built-in sanitized demonstration mode that performs no network scanning.
+- Guided profiles replace routine expert tuning: Standard Presales, Quick Discovery, Focused TLS and PQC, and Custom.
+- Quick Discovery can prepare a second-round TLS and PQC assessment with the customer scope and discovered candidate ports carried forward.
+- A numbered Scope, Discover, Validate, and Export guide keeps the workflow visible.
 
 ## Local Run
 

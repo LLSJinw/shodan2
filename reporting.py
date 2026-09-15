@@ -171,15 +171,16 @@ def build_docx(result: dict[str, Any]) -> BytesIO:
     subtitle = document.add_paragraph("Presales Reconnaissance and Customer Validation Report")
     subtitle.style = "Subtitle"
 
-    identity = document.add_table(rows=4, cols=2)
-    identity.style = "Table Grid"
-    _set_table_borders(identity)
     identity_rows = (
         ("Customer / account", meta.get("customer", "Internal or sanitized assessment")),
         ("Engagement", meta.get("engagement", "External reconnaissance")),
+        ("Assessment profile", meta.get("profile", "Standard presales")),
         ("Assessment time", meta.get("completed_at", "")),
         ("Scope", meta.get("scope", "Authorized targets supplied for this run")),
     )
+    identity = document.add_table(rows=len(identity_rows), cols=2)
+    identity.style = "Table Grid"
+    _set_table_borders(identity)
     for row, values in zip(identity.rows, identity_rows):
         _set_cell_text(row.cells[0], values[0], bold=True, color=TEAL, size=9)
         _set_cell_text(row.cells[1], values[1], size=9)

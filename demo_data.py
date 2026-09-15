@@ -94,6 +94,7 @@ def build_demo_result() -> dict:
             "engagement": "Sanitized external exposure and PQC readiness demonstration",
             "scope": "Synthetic documentation assets only; no real scanning performed",
             "started_at": now, "completed_at": now, "tool_version": "2.0.0-demo",
+            "profile": "Sanitized demonstration", "normalized_targets": ["example.test"],
             "method": "Synthetic observations for interface and report demonstration",
         },
         "summary": {
