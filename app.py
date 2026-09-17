@@ -104,12 +104,15 @@ def inject_styles() -> None:
         div[data-testid="stMetric"] { min-height:106px; padding:14px; background:white; border:1px solid var(--line); border-radius:7px; }
         div[data-testid="stMetricLabel"] { color:var(--muted); }
         div[data-testid="stMetricValue"] { color:var(--ink); font-size:1.65rem; }
-        .finding-summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin:8px 0 16px; }
-        .finding-summary div { padding:10px 12px; background:white; border:1px solid var(--line); border-left:3px solid #788991; border-radius:6px; }
-        .finding-summary div:nth-child(1) { border-left-color:var(--red); }.finding-summary div:nth-child(2) { border-left-color:#c47a26; }
-        .finding-summary strong,.finding-summary small { display:block; }.finding-summary strong { font-size:1.2rem; }.finding-summary small { margin-top:2px; color:var(--muted); font-size:.68rem; }
         .priority-title { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px; margin:14px 0 2px; }
         .priority-title strong { color:var(--ink); font-size:.83rem; }.priority-title span { color:var(--muted); font-size:.7rem; }
+        .st-key-priority_filter_urgent button,.st-key-priority_filter_high button,.st-key-priority_filter_medium button,.st-key-priority_filter_review button { min-height:58px; justify-content:flex-start; font-size:.82rem; font-weight:750; }
+        .st-key-priority_filter_urgent button { border-left:4px solid var(--red); }.st-key-priority_filter_high button { border-left:4px solid #c47a26; }
+        .st-key-priority_filter_medium button { border-left:4px solid #b48a2c; }.st-key-priority_filter_review button { border-left:4px solid #788991; }
+        .st-key-priority_filter_urgent button[kind="primary"] { color:#8b2f2a; background:#f4d8d6; border-color:#d8a5a1; }
+        .st-key-priority_filter_high button[kind="primary"] { color:#8a5314; background:#f8e5cf; border-color:#dfb37f; }
+        .st-key-priority_filter_medium button[kind="primary"] { color:#6f5a12; background:#f5efd9; border-color:#d7c57e; }
+        .st-key-priority_filter_review button[kind="primary"] { color:#455b65; background:#e8eef0; border-color:#b9c8cd; }
         .finding-list { display:grid; gap:9px; }
         .finding-row { padding:12px 14px; background:white; border:1px solid var(--line); border-left:4px solid #788991; border-radius:6px; }
         .finding-row.urgent { border-left-color:var(--red); }.finding-row.high { border-left-color:#c47a26; }.finding-row.medium { border-left-color:#b48a2c; }
@@ -372,12 +375,26 @@ def run_scan(
     }
 
 
-def priority_summary(findings: list[dict[str, Any]]) -> str:
+def toggle_priority_filter(level: str) -> None:
+    current = st.session_state.get("priority_filter", "")
+    st.session_state["priority_filter"] = "" if current == level else level
+
+
+def priority_filter_controls(findings: list[dict[str, Any]]) -> str:
     counts = Counter(row.get("Priority", "Review") for row in findings)
-    return "".join(
-        f"<div><strong>{counts.get(level, 0)}</strong><small>{level}</small></div>"
-        for level in ("Urgent", "High", "Medium", "Review")
-    )
+    selected = st.session_state.get("priority_filter", "")
+    columns = st.columns(4)
+    for column, level in zip(columns, ("Urgent", "High", "Medium", "Review")):
+        column.button(
+            f"{counts.get(level, 0)}  {level}",
+            key=f"priority_filter_{level.lower()}",
+            type="primary" if selected == level else "secondary",
+            on_click=toggle_priority_filter,
+            args=(level,),
+            help=f"Show {level.lower()} findings; click again to clear the filter",
+            width="stretch",
+        )
+    return selected
 
 
 def priority_cell_style(value: Any) -> str:
@@ -504,10 +521,21 @@ def display_results(result: dict[str, Any]) -> None:
             column.metric(label, value, help=help_text)
 
     st.markdown(
-        "<div class='priority-title'><strong>All prioritized findings</strong><span>Across vulnerabilities, internet exposure, and TLS/PQC observations</span></div>",
+        "<div class='priority-title'><strong>All prioritized findings</strong><span>Select a level to inspect matching vulnerabilities, internet exposure, and TLS/PQC observations</span></div>",
         unsafe_allow_html=True,
     )
-    st.markdown(f"<div class='finding-summary'>{priority_summary(result['findings'])}</div>", unsafe_allow_html=True)
+    selected_priority = priority_filter_controls(result["findings"])
+    if selected_priority:
+        selected_findings = [
+            finding for finding in result["findings"]
+            if finding.get("Priority", "Review") == selected_priority
+        ]
+        st.markdown(f"### {selected_priority} findings")
+        if selected_findings:
+            st.markdown(finding_rows(selected_findings), unsafe_allow_html=True)
+        else:
+            st.info(f"No {selected_priority.lower()} findings were generated for this assessment.")
+        st.caption(f"Showing {len(selected_findings)} of {len(result['findings'])} findings. Select {selected_priority} again to clear the filter.")
 
     if meta.get("profile") == PROFILE_QUICK:
         candidate_ports = sorted({

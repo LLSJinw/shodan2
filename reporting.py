@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from io import BytesIO
 from typing import Any
 
@@ -20,6 +21,14 @@ TEAL = "087F73"
 PALE = "E7F3F1"
 MUTED = "5D6C74"
 RED = "B74D46"
+PRIORITY_STYLES = {
+    "Urgent": ("F4D8D6", "8B2F2A"),
+    "High": ("F8E5CF", "8A5314"),
+    "Medium": ("F5EFD9", "6F5A12"),
+    "Review": ("E8EEF0", "455B65"),
+    "Low": ("E8F3EF", "27685F"),
+    "Info": ("EEF2F3", "52636C"),
+}
 
 
 def _frame(rows: list[dict[str, Any]], columns: list[str] | None = None) -> pd.DataFrame:
@@ -75,6 +84,13 @@ def _shade(cell, fill: str) -> None:
     properties.append(shading)
 
 
+def _shade_run(run, fill: str) -> None:
+    properties = run._r.get_or_add_rPr()
+    shading = OxmlElement("w:shd")
+    shading.set(qn("w:fill"), fill)
+    properties.append(shading)
+
+
 def _set_table_borders(table, color: str = "D9D9D9") -> None:
     properties = table._tbl.tblPr
     existing = properties.find(qn("w:tblBorders"))
@@ -91,7 +107,7 @@ def _set_table_borders(table, color: str = "D9D9D9") -> None:
     properties.append(borders)
 
 
-def _set_cell_text(cell, value: Any, *, bold: bool = False, color: str = INK, size: int = 8) -> None:
+def _set_cell_text(cell, value: Any, *, bold: bool = False, color: str = INK, size: int = 8):
     cell.text = ""
     paragraph = cell.paragraphs[0]
     run = paragraph.add_run(str(value if value not in (None, "") else "-"))
@@ -100,9 +116,16 @@ def _set_cell_text(cell, value: Any, *, bold: bool = False, color: str = INK, si
     run.font.size = Pt(size)
     run.font.color.rgb = RGBColor.from_string(color)
     cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+    return run
 
 
-def _add_table(document: Document, rows: list[dict[str, Any]], columns: list[str], limit: int = 30) -> None:
+def _add_table(
+    document: Document,
+    rows: list[dict[str, Any]],
+    columns: list[str],
+    limit: int = 30,
+    styled_columns: dict[str, dict[str, tuple[str, str]]] | None = None,
+) -> None:
     if not rows:
         document.add_paragraph("No observations recorded.", style="Intense Quote")
         return
@@ -115,8 +138,15 @@ def _add_table(document: Document, rows: list[dict[str, Any]], columns: list[str
     for row in rows[:limit]:
         cells = table.add_row().cells
         for index, column in enumerate(columns):
-            _set_cell_text(cells[index], row.get(column, ""))
-            if len(table.rows) % 2 == 0:
+            value = row.get(column, "")
+            run = _set_cell_text(cells[index], value)
+            palette = (styled_columns or {}).get(column, {}).get(str(value))
+            if palette:
+                fill, color = palette
+                _shade(cells[index], fill)
+                run.bold = True
+                run.font.color.rgb = RGBColor.from_string(color)
+            elif len(table.rows) % 2 == 0:
                 _shade(cells[index], "F4F7F8")
     if len(rows) > limit:
         note = document.add_paragraph(f"Showing {limit} of {len(rows)} records. See the Excel evidence package for all rows.")
@@ -147,7 +177,7 @@ def build_docx(result: dict[str, Any]) -> BytesIO:
     document = Document()
     section = document.sections[0]
     section.top_margin = Inches(0.65)
-    section.bottom_margin = Inches(0.65)
+    section.bottom_margin = Inches(0.55)
     section.left_margin = Inches(0.65)
     section.right_margin = Inches(0.65)
 
@@ -224,6 +254,26 @@ def build_docx(result: dict[str, Any]) -> BytesIO:
         label_run.font.color.rgb = RGBColor.from_string(MUTED)
         _shade(cell, PALE)
 
+    priority_counts = Counter(str(finding.get("Priority", "Review")) for finding in findings)
+    priority_table = document.add_table(rows=1, cols=4)
+    priority_table.style = "Table Grid"
+    _set_table_borders(priority_table)
+    for index, level in enumerate(("Urgent", "High", "Medium", "Review")):
+        fill, color = PRIORITY_STYLES[level]
+        cell = priority_table.rows[0].cells[index]
+        cell.text = ""
+        paragraph = cell.paragraphs[0]
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        count_run = paragraph.add_run(f"{priority_counts.get(level, 0)}\n")
+        count_run.bold = True
+        count_run.font.size = Pt(16)
+        count_run.font.color.rgb = RGBColor.from_string(color)
+        label_run = paragraph.add_run(level)
+        label_run.bold = True
+        label_run.font.size = Pt(8)
+        label_run.font.color.rgb = RGBColor.from_string(color)
+        _shade(cell, fill)
+
     _heading(document, "Prioritized findings")
     if not findings:
         document.add_paragraph("No prioritized findings were generated from the available observations.")
@@ -231,11 +281,19 @@ def build_docx(result: dict[str, Any]) -> BytesIO:
         finding_title = document.add_paragraph()
         finding_title.paragraph_format.space_before = Pt(7)
         finding_title.paragraph_format.space_after = Pt(3)
-        lead = finding_title.add_run(
-            f"{finding.get('Finding ID', '')}  {finding.get('Priority', 'Review')}  {finding.get('Domain', '')}"
-        )
-        lead.bold = True
-        lead.font.size = Pt(11)
+        identifier = finding_title.add_run(f"{finding.get('Finding ID', '')}  ")
+        identifier.bold = True
+        identifier.font.size = Pt(11)
+        priority = str(finding.get("Priority", "Review"))
+        fill, color = PRIORITY_STYLES.get(priority, PRIORITY_STYLES["Review"])
+        priority_run = finding_title.add_run(f" {priority.upper()} ")
+        priority_run.bold = True
+        priority_run.font.size = Pt(9)
+        priority_run.font.color.rgb = RGBColor.from_string(color)
+        _shade_run(priority_run, fill)
+        domain = finding_title.add_run(f"  {finding.get('Domain', '')}")
+        domain.bold = True
+        domain.font.size = Pt(11)
         document.add_paragraph(f"Asset: {finding.get('Asset', '-')}")
         document.add_paragraph(str(finding.get("Observation", "")))
         for label, key in (
@@ -258,7 +316,13 @@ def build_docx(result: dict[str, Any]) -> BytesIO:
     _add_table(document, asset_report_rows, ["IP", "Hostnames", "Discovery sources", "Open TCP ports", "InternetDB status"], limit=40)
 
     _heading(document, "Vulnerability observations")
-    _add_table(document, cves, ["IP", "CVE ID", "CVSS", "CISA KEV", "EPSS", "Technical Priority", "Title"], limit=35)
+    _add_table(
+        document,
+        cves,
+        ["IP", "CVE ID", "CVSS", "CISA KEV", "EPSS", "Technical Priority", "Title"],
+        limit=35,
+        styled_columns={"Technical Priority": PRIORITY_STYLES},
+    )
 
     _heading(document, "TLS and post-quantum readiness")
     tls_report_rows = []
@@ -272,7 +336,13 @@ def build_docx(result: dict[str, Any]) -> BytesIO:
             "Risk": row.get("risk", ""),
             "Findings": row.get("findings", ""),
         })
-    _add_table(document, tls_report_rows, ["Endpoint", "TLS", "Certificate expiry", "Public key", "KEX verdict", "Risk", "Findings"], limit=35)
+    _add_table(
+        document,
+        tls_report_rows,
+        ["Endpoint", "TLS", "Certificate expiry", "Public key", "KEX verdict", "Risk", "Findings"],
+        limit=35,
+        styled_columns={"Risk": PRIORITY_STYLES},
+    )
 
     _heading(document, "Interpretation and limitations")
     limitations = (
