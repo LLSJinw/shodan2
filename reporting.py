@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections import Counter
+import datetime as dt
 from io import BytesIO
+import re
 from typing import Any
 
 import pandas as pd
@@ -29,6 +31,22 @@ PRIORITY_STYLES = {
     "Low": ("E8F3EF", "27685F"),
     "Info": ("EEF2F3", "52636C"),
 }
+PRIORITY_ORDER = {"Urgent": 0, "High": 1, "Medium": 2, "Review": 3}
+AI_INPUT_COLUMNS = [
+    "Section",
+    "Order",
+    "Metric",
+    "Value",
+    "Priority",
+    "Asset",
+    "CVE",
+    "CVSS",
+    "EPSS",
+    "KEV",
+    "Detail",
+    "Source Sheet",
+    "Source Rule",
+]
 
 
 def _frame(rows: list[dict[str, Any]], columns: list[str] | None = None) -> pd.DataFrame:
@@ -41,12 +59,301 @@ def _frame(rows: list[dict[str, Any]], columns: list[str] | None = None) -> pd.D
     return frame
 
 
+def _as_float(value: Any, default: float = -1.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _cve_year(value: Any) -> int:
+    match = re.match(r"^CVE-(\d{4})-", str(value or ""), flags=re.IGNORECASE)
+    return int(match.group(1)) if match else 0
+
+
+def _split_csv(value: Any) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _is_true(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "yes", "1"}
+
+
+def _parse_date(value: Any) -> dt.date | None:
+    if value in (None, ""):
+        return None
+    try:
+        return dt.date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _ai_input_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build a canonical, model-readable manifest without generative interpretation."""
+    findings = [row for row in result.get("findings", []) if row.get("Finding ID")]
+    assets = [row for row in result.get("asset_rows", []) if row.get("IP")]
+    cves = [row for row in result.get("cve_rows", []) if row.get("CVE ID")]
+    tls_rows = list(result.get("tls_rows", []))
+    source_health = [row for row in result.get("source_health", []) if any(value not in (None, "") for value in row.values())]
+    rejected = [row for row in result.get("rejected_targets", []) if any(value not in (None, "") for value in row.values())]
+
+    rows: list[dict[str, Any]] = []
+
+    def add(
+        section: str,
+        order: int,
+        metric: str,
+        value: Any = "",
+        *,
+        priority: str = "",
+        asset: str = "",
+        cve: str = "",
+        cvss: Any = "",
+        epss: Any = "",
+        kev: str = "",
+        detail: str = "",
+        source_sheet: str = "",
+        source_rule: str = "",
+    ) -> None:
+        rows.append({
+            "Section": section,
+            "Order": order,
+            "Metric": metric,
+            "Value": value,
+            "Priority": priority,
+            "Asset": asset,
+            "CVE": cve,
+            "CVSS": cvss,
+            "EPSS": epss,
+            "KEV": kev,
+            "Detail": detail,
+            "Source Sheet": source_sheet,
+            "Source Rule": source_rule,
+        })
+
+    add(
+        "USAGE_RULE",
+        1,
+        "Canonical values",
+        "Use exactly",
+        detail="Copy counts and ranked CVEs from AI_INPUT. Do not recalculate or add report rows to source totals.",
+        source_sheet="AI_INPUT",
+        source_rule="Application-generated deterministic manifest",
+    )
+    add(
+        "USAGE_RULE",
+        2,
+        "Evidence boundary",
+        "External observations only",
+        detail="Do not claim confirmed ownership, vulnerability applicability, exploitability, control gaps, business risk, or product need.",
+        source_sheet="Methodology",
+        source_rule="Customer and authenticated validation required",
+    )
+    add(
+        "USAGE_RULE",
+        3,
+        "Raw appendix",
+        "All non-AI_INPUT sheets",
+        detail="The original workbook sheets remain Appendix A. AI_INPUT is a canonical index, not a replacement for raw evidence.",
+        source_sheet="Workbook",
+        source_rule="Do not reproduce all raw rows in the main report",
+    )
+
+    hostnames = [hostname for row in assets for hostname in _split_csv(row.get("Hostnames"))]
+    service_pairs: set[tuple[str, int]] = set()
+    for row in assets:
+        ports = row.get("Ports")
+        if not isinstance(ports, list):
+            ports = _split_csv(row.get("Open TCP ports"))
+        for port in ports:
+            try:
+                service_pairs.add((str(row.get("IP", "")), int(port)))
+            except (TypeError, ValueError):
+                continue
+
+    scope_counts = [
+        ("Public IPs", len({str(row.get("IP")) for row in assets})),
+        ("Hostname records", len(hostnames)),
+        ("Unique hostnames", len(set(hostnames))),
+        ("Open-service observations", len(service_pairs)),
+        ("Rejected targets", len(rejected)),
+    ]
+    for order, (metric, value) in enumerate(scope_counts, start=1):
+        source = "Rejected_Targets" if metric == "Rejected targets" else "Assets"
+        add("SCOPE_COUNT", order, metric, value, source_sheet=source, source_rule="Counted from nonblank raw records")
+
+    finding_priorities = Counter(str(row.get("Priority") or "Review") for row in findings)
+    add("OVERALL_FINDINGS", 1, "Total findings", len(findings), source_sheet="Priority_Findings", source_rule="Nonblank Finding ID rows")
+    for order, priority in enumerate(PRIORITY_ORDER, start=2):
+        add(
+            "OVERALL_FINDINGS",
+            order,
+            f"{priority} findings",
+            finding_priorities.get(priority, 0),
+            priority=priority,
+            source_sheet="Priority_Findings",
+            source_rule="Group nonblank Finding ID rows by Priority",
+        )
+
+    cve_priorities = Counter(str(row.get("Technical Priority") or "Review") for row in cves)
+    unique_cves = {str(row.get("CVE ID")) for row in cves}
+    add("CVE_COUNTS", 1, "CVE associations", len(cves), source_sheet="Vulnerabilities", source_rule="Nonblank IP + CVE ID rows")
+    add("CVE_COUNTS", 2, "Unique CVE IDs", len(unique_cves), source_sheet="Vulnerabilities", source_rule="Unique nonblank CVE ID values")
+    add("CVE_COUNTS", 3, "CISA KEV Yes", sum(1 for row in cves if str(row.get("CISA KEV")) == "Yes"), source_sheet="Vulnerabilities", source_rule="Exact Yes values")
+    add("CVE_COUNTS", 4, "Known ransomware use Yes", sum(1 for row in cves if str(row.get("Known ransomware use")) == "Yes"), source_sheet="Vulnerabilities", source_rule="Exact Yes values")
+    add("CVE_COUNTS", 5, "Known ransomware use Unknown", sum(1 for row in cves if str(row.get("Known ransomware use")) == "Unknown"), source_sheet="Vulnerabilities", source_rule="Exact Unknown values")
+    for order, priority in enumerate(PRIORITY_ORDER, start=6):
+        add(
+            "CVE_PRIORITY",
+            order,
+            f"{priority} CVE associations",
+            cve_priorities.get(priority, 0),
+            priority=priority,
+            source_sheet="Vulnerabilities",
+            source_rule="Group nonblank CVE rows by Technical Priority",
+        )
+
+    completed_date = _parse_date(result.get("meta", {}).get("completed_at")) or dt.datetime.now(dt.timezone.utc).date()
+    reachable = [row for row in tls_rows if _is_true(row.get("reachable"))]
+    failed = [row for row in tls_rows if not _is_true(row.get("reachable"))]
+    certificate_status = Counter()
+    for row in tls_rows:
+        if not _is_true(row.get("reachable")):
+            certificate_status["Unknown"] += 1
+            continue
+        not_before = _parse_date(row.get("not_before"))
+        days_to_expiry = _as_float(row.get("days_to_expiry"), default=float("nan"))
+        if not_before and not_before > completed_date:
+            certificate_status["Not yet valid"] += 1
+        elif days_to_expiry != days_to_expiry:
+            certificate_status["Unknown"] += 1
+        elif days_to_expiry < 0:
+            certificate_status["Expired"] += 1
+        else:
+            certificate_status["Valid"] += 1
+
+    tls_counts = [
+        ("TLS endpoint combinations", len(tls_rows)),
+        ("TLS successful", len(reachable)),
+        ("TLS failed", len(failed)),
+        ("Certificates valid", certificate_status.get("Valid", 0)),
+        ("Certificates expired", certificate_status.get("Expired", 0)),
+        ("Certificates not yet valid", certificate_status.get("Not yet valid", 0)),
+        ("Certificate status unknown", certificate_status.get("Unknown", 0)),
+        ("RSA certificate observations", sum(1 for row in reachable if str(row.get("public_key_algorithm") or "").upper().startswith("RSA"))),
+        ("Quantum-vulnerable certificate observations", sum(1 for row in reachable if _is_true(row.get("quantum_vulnerable")))),
+    ]
+    for order, (metric, value) in enumerate(tls_counts, start=1):
+        add("TLS_COUNTS", order, metric, value, source_sheet="TLS_PQC", source_rule="Endpoint rows; failed handshakes have unknown certificate status")
+
+    kex_counts = Counter(str(row.get("key_exchange_pqc") or "UNKNOWN").upper() for row in reachable)
+    kex_rows = [
+        ("PQC-protected KEX", kex_counts.get("PQC-PROTECTED", 0)),
+        ("Classical-only KEX", kex_counts.get("CLASSICAL-ONLY", 0)),
+        ("Unknown KEX", kex_counts.get("UNKNOWN", 0)),
+        ("Failed KEX tests", len(failed)),
+    ]
+    for order, (metric, value) in enumerate(kex_rows, start=1):
+        add("KEX_COUNTS", order, metric, value, source_sheet="TLS_PQC", source_rule="Successful rows grouped by key_exchange_pqc; failed rows separate")
+
+    source_counts = [
+        ("Priority_Findings rows", len(findings), "Priority_Findings"),
+        ("Assets rows", len(assets), "Assets"),
+        ("Vulnerabilities rows", len(cves), "Vulnerabilities"),
+        ("TLS_PQC rows", len(tls_rows), "TLS_PQC"),
+        ("Source_Health rows", len(source_health), "Source_Health"),
+        ("Rejected_Targets rows", len(rejected), "Rejected_Targets"),
+    ]
+    for order, (metric, value, source) in enumerate(source_counts, start=1):
+        add("SOURCE_COVERAGE", order, metric, value, source_sheet=source, source_rule="Nonblank data rows")
+
+    add(
+        "RECONCILIATION",
+        1,
+        "Overall priority sum equals total findings",
+        "PASS" if sum(finding_priorities.get(priority, 0) for priority in PRIORITY_ORDER) == len(findings) else "FAIL",
+        source_sheet="Priority_Findings",
+        source_rule="Urgent + High + Medium + Review = Total findings",
+    )
+    add(
+        "RECONCILIATION",
+        2,
+        "CVE priority sum equals CVE associations",
+        "PASS" if sum(cve_priorities.get(priority, 0) for priority in PRIORITY_ORDER) == len(cves) else "FAIL",
+        source_sheet="Vulnerabilities",
+        source_rule="Urgent + High + Medium + Review = CVE associations",
+    )
+    add(
+        "RECONCILIATION",
+        3,
+        "TLS status sum equals endpoint combinations",
+        "PASS" if sum(certificate_status.values()) == len(tls_rows) else "FAIL",
+        source_sheet="TLS_PQC",
+        source_rule="Valid + Expired + Not yet valid + Unknown = TLS endpoint combinations",
+    )
+    add(
+        "RECONCILIATION",
+        4,
+        "KEX status sum equals endpoint combinations",
+        "PASS" if sum(kex_counts.values()) + len(failed) == len(tls_rows) else "FAIL",
+        source_sheet="TLS_PQC",
+        source_rule="PQC-protected + Classical-only + Unknown + Failed = TLS endpoint combinations",
+    )
+
+    ranked_cves = sorted(
+        cves,
+        key=lambda row: (
+            0 if str(row.get("CISA KEV")) == "Yes" else 1,
+            0 if str(row.get("Known ransomware use")) == "Yes" else 1,
+            PRIORITY_ORDER.get(str(row.get("Technical Priority") or "Review"), 9),
+            -_as_float(row.get("CVSS")),
+            -_as_float(row.get("EPSS")),
+            -_cve_year(row.get("CVE ID")),
+            str(row.get("IP") or ""),
+            str(row.get("CVE ID") or ""),
+        ),
+    )
+    for rank, row in enumerate(ranked_cves[:10], start=1):
+        add(
+            "TOP_CVE",
+            rank,
+            "Priority CVE association",
+            rank,
+            priority=str(row.get("Technical Priority") or "Review"),
+            asset=str(row.get("IP") or ""),
+            cve=str(row.get("CVE ID") or ""),
+            cvss=row.get("CVSS", ""),
+            epss=row.get("EPSS", ""),
+            kev=str(row.get("CISA KEV") or "Unknown"),
+            detail=str(row.get("Title") or "Description unavailable"),
+            source_sheet="Vulnerabilities",
+            source_rule="KEV, ransomware, priority, CVSS, EPSS, CVE year, asset, CVE ID",
+        )
+
+    for order, (ip, port) in enumerate(sorted(service_pairs), start=1):
+        add(
+            "OPEN_SERVICE",
+            order,
+            "Observed IP-port pair",
+            port,
+            asset=ip,
+            detail="Externally reported service observation; product, purpose, ownership, and control context unconfirmed.",
+            source_sheet="Assets",
+            source_rule="Unique IP + port pair",
+        )
+
+    return rows
+
+
 def build_excel(result: dict[str, Any]) -> BytesIO:
     meta = result.get("meta", {})
     summary = result.get("summary", {})
     overview_rows = [{"Field": key.replace("_", " ").title(), "Value": value} for key, value in {**meta, **summary}.items()]
     asset_rows = [{key: value for key, value in row.items() if key != "Ports"} for row in result.get("asset_rows", [])]
     sheets = {
+        "AI_INPUT": _frame(_ai_input_rows(result), AI_INPUT_COLUMNS),
         "Overview": _frame(overview_rows),
         "Priority_Findings": _frame(result.get("findings", [])),
         "Assets": _frame(asset_rows),
